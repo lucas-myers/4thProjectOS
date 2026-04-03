@@ -1,5 +1,6 @@
 #include <iostream>
 #include <cstdlib>
+#include <ctime>
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
@@ -12,7 +13,24 @@ struct Message {
     int quantum;
 };
 
-int main() {
+int main(int argc, char* argv[]) {
+    if (argc < 3) {
+        cerr << "worker: missing arguments\n";
+        return 1;
+    }
+
+    double burstLimitSeconds = atof(argv[1]);
+    int localIndex = atoi(argv[2]);
+
+    int totalBurstNano = static_cast<int>(burstLimitSeconds * 1000000000.0);
+    if (totalBurstNano <= 0) {
+        totalBurstNano = 1000000;
+    }
+
+    int usedSoFar = 0;
+
+    srand(static_cast<unsigned int>(getpid() ^ time(nullptr)));
+
     key_t msgKey = ftok(".", 75);
     if (msgKey == -1) {
         perror("worker ftok");
@@ -25,11 +43,41 @@ int main() {
         return 1;
     }
 
-    // Day 1 
+    while (true) {
+        Message msg;
 
-    //will receive dispatch messages and respond to oss
+        if (msgrcv(msgId, &msg, sizeof(Message) - sizeof(long), getpid(), 0) == -1) {
+            perror("worker msgrcv");
+            return 1;
+        }
 
-    cout << "Worker placeholder started. PID: " << getpid() << endl;
+        int quantum = msg.quantum;
+        int remaining = totalBurstNano - usedSoFar;
+
+        Message reply;
+        reply.mtype = 1;
+        reply.index = localIndex;
+
+        if (remaining <= quantum) {
+            usedSoFar += remaining;
+            reply.quantum = -remaining; // negative means terminated
+
+            if (msgsnd(msgId, &reply, sizeof(Message) - sizeof(long), 0) == -1) {
+                perror("worker msgsnd terminate");
+                return 1;
+            }
+
+            break;
+        } else {
+            usedSoFar += quantum;
+            reply.quantum = quantum; // used full quantum
+
+            if (msgsnd(msgId, &reply, sizeof(Message) - sizeof(long), 0) == -1) {
+                perror("worker msgsnd full quantum");
+                return 1;
+            }
+        }
+    }
 
     return 0;
 }

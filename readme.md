@@ -1,5 +1,5 @@
 Name: Lucas Myers
-Date: 4/7/2026
+Date: 4/1/2026
 Environment: Visual Studio Code, Linux
 
 How to Compile Project: 
@@ -41,6 +41,27 @@ make
 13. Tested that oss runs correctly, initializes all structures, writes to the log file, and exits cleanly without memory or IPC leaks.
 
 14. Worker process currently acts as a placeholder to ensure compilation and message queue setup works before adding scheduling logic.
+
+15. Added the Round Robin Scheduling using the ready queue.
+
+16. OSS selects the process at the front of the queue and sends it a message containing the time quantum
+
+17. If the worker uses the whole quantum, it gets placed back into the queue.
+
+18.If it finishes early, it sends a negative value and gets removed from the system.
+
+19. Used message queues to handle communication between oss and worker. (dispatching logic)
+
+20.   Updated the worker so it can simulate amount of CPU usage.
+
+21. Ran into an issue where messages were not being recieved correctly due to wrong type. Fixed this by using PID .
+
+22. Added more detail to logging. Now inlucde ready queues, dispatch events, cput time used by the processes, process termination.
+
+23. Tested program to make sure processes are being scheduled in the correct order.
+
+
+
 
 AI used: ChatGPT
 
