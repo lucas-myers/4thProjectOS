@@ -60,7 +60,7 @@ int main(int argc, char* argv[]) {
 
         if (remaining <= quantum) {
             usedSoFar += remaining;
-            reply.quantum = -remaining; // negative means terminated
+            reply.quantum = -remaining;
 
             if (msgsnd(msgId, &reply, sizeof(Message) - sizeof(long), 0) == -1) {
                 perror("worker msgsnd terminate");
@@ -68,12 +68,33 @@ int main(int argc, char* argv[]) {
             }
 
             break;
-        } else {
-            usedSoFar += quantum;
-            reply.quantum = quantum; // used full quantum
+        }
+
+        int blockChance = rand() % 100;
+
+        if (blockChance < 20) {
+            int used = rand() % quantum;
+            if (used <= 0) {
+                used = 1;
+            }
+
+            if (used > remaining) {
+                used = remaining;
+            }
+
+            usedSoFar += used;
+            reply.quantum = used;
 
             if (msgsnd(msgId, &reply, sizeof(Message) - sizeof(long), 0) == -1) {
-                perror("worker msgsnd full quantum");
+                perror("worker msgsnd block");
+                return 1;
+            }
+        } else {
+            usedSoFar += quantum;
+            reply.quantum = quantum;
+
+            if (msgsnd(msgId, &reply, sizeof(Message) - sizeof(long), 0) == -1) {
+                perror("worker msgsnd full");
                 return 1;
             }
         }

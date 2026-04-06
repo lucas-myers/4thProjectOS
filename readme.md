@@ -60,6 +60,24 @@ make
 
 23. Tested program to make sure processes are being scheduled in the correct order.
 
+Implemented blocked queue and unblocking logic
+
+Added process wake-up handling
+
+Created a function to check all blocked processes and determine if they should be unblocked.
+
+Added process wake-up handling
+
+Improved worker simulation
+
+Updated worker to include a 20% chance of blocking.
+
+Improved scheduling realism
+
+The system now properly handles all three process states:
+Running
+Blocked
+Terminated
 
 
 
