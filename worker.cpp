@@ -73,10 +73,7 @@ int main(int argc, char* argv[]) {
         int blockChance = rand() % 100;
 
         if (blockChance < 20) {
-            int used = rand() % quantum;
-            if (used <= 0) {
-                used = 1;
-            }
+            int used = (rand() % (quantum - 1)) + 1;
 
             if (used > remaining) {
                 used = remaining;
@@ -86,7 +83,7 @@ int main(int argc, char* argv[]) {
             reply.quantum = used;
 
             if (msgsnd(msgId, &reply, sizeof(Message) - sizeof(long), 0) == -1) {
-                perror("worker msgsnd block");
+                perror("worker msgsnd blocked");
                 return 1;
             }
         } else {
