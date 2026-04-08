@@ -106,7 +106,7 @@ average CPU utilization
 
 38. Final day was mainly used for polishing the project, improving logging, and making sure the scheduler behavior matched the assignment requirements.
 
-39. Added comments for readability.
+
 
 
 
