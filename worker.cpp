@@ -31,6 +31,8 @@ int main(int argc, char* argv[]) {
 
     srand(static_cast<unsigned int>(getpid() ^ time(nullptr)));
 
+    usleep(100000);
+
     key_t msgKey = ftok(".", 75);
     if (msgKey == -1) {
         perror("worker ftok");

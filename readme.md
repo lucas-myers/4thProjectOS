@@ -66,7 +66,7 @@ make
 
 26. Created a function to check all blocked processes and determine if they should be unblocked.
 
-27. Added process wake-up handling
+27.
 
 28. Improved worker simulation
 
@@ -87,7 +87,26 @@ Terminated
 
 32. Finished the blocked and ready queue behavior so the scheduler now handles process creation, dispatching, blocking, unblocking, and termination.
 
+33. Finalized the full scheduler for the project.
 
+34. Added final statistics to the end of the simulation.
+The program now reports:
+total processes launched
+total processes finished
+total CPU busy time
+total system overhead time
+total idle time
+average CPU utilization
+
+35. Added a log line limit to prevent the log file from growing too large if the program runs too long or gets stuck in a loop.
+
+36. Improved the final cleanup so child processes, shared memory, and message queues are properly removed on normal exit and abnormal termination.
+
+37. Finished testing different combinations of command line options to make sure the program works correctly with different values for -n, -s, -t, -i, and -f.
+
+38. Final day was mainly used for polishing the project, improving logging, and making sure the scheduler behavior matched the assignment requirements.
+
+39. Added comments for readability.
 
 
 
@@ -96,3 +115,15 @@ AI used: ChatGPT
 - How to structure the project step by step
 
 This helped break the assignment into smaller parts so I could build it over multiple days instead of all at once.
+
+-Asked ChatGPT how to handle blocking, unblocking, and round-robin scheduling logic.
+
+This helped break down the scheduling portion of the assignment into smaller steps and made it easier to build the project over multiple days.
+
+-Asked ChatGPT how to use signal handling and cleanup functions.
+
+This helped show how to properly remove shared memory, delete message queues, and terminate child processes if the program exits early or gets interrupted.
+
+-Asked ChatGPT how to calculate CPU utilization and improve final statistics.
+
+This helped with adding the final report at the end of the simulation and understanding how to track busy time, idle time, and overhead time.

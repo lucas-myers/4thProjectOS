@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <cerrno>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/ipc.h>
@@ -16,31 +17,38 @@
 
 using namespace std;
 
+// Constants for limits and timing
 const int MAX_TOTAL_PROCESSES = 20;
 const int PCB_SIZE = 18;
 const unsigned int BILLION = 1000000000;
-const unsigned int BASE_QUANTUM = 25000000;   // 25ms
-const unsigned int BLOCK_TIME = 100000000;    // 100ms
+const unsigned int BASE_QUANTUM = 25000000;   // 25ms time slice
+const unsigned int BLOCK_TIME = 100000000;    // time a process stays blocked
+const unsigned int IDLE_INCREMENT = 100000;   // how much time advances when idle
+const unsigned int DISPATCH_OVERHEAD = 1000;  // cost of dispatching a process
+const unsigned int UNBLOCK_OVERHEAD = 5000;   // cost of unblocking
 const int MAX_LOG_LINES = 10000;
 
+// Simulated clock shared between OSS and workers
 struct SimClock {
     unsigned int seconds;
     unsigned int nanoseconds;
 };
 
+// PCB (process control block) for each process
 struct PCB {
-    int occupied;
-    pid_t pid;
-    int localPid;
+    int occupied;              // if slot is being used
+    pid_t pid;                 // actual system PID
+    int localPid;              // index in table (P0, P1, etc.)
     unsigned int startSeconds;
     unsigned int startNano;
     unsigned int serviceTimeSeconds;
     unsigned int serviceTimeNano;
-    unsigned int eventWaitSec;
+    unsigned int eventWaitSec; // when process will unblock
     unsigned int eventWaitNano;
-    int blocked;
+    int blocked;               // 1 = blocked, 0 = ready
 };
 
+// Message struct for message queue communication
 struct Message {
     long mtype;
     int index;
@@ -52,8 +60,9 @@ int msgId = -1;
 SimClock* simClock = nullptr;
 
 PCB processTable[PCB_SIZE];
-queue<int> readyQueue;
+queue<int> readyQueue; // Round Robin queue
 
+// Simulation settings
 int totalChildren = 5;
 int maxSimultaneous = 2;
 double timeLimitForChildren = 3.0;
@@ -63,25 +72,34 @@ string logFileName = "oss.log";
 ofstream logFile;
 int logLines = 0;
 
+// Tracking stats
 int launchedTotal = 0;
 int finishedTotal = 0;
 int runningNow = 0;
 
+// Time tracking for events
 unsigned int nextLaunchSec = 0;
 unsigned int nextLaunchNano = 0;
 unsigned int nextTablePrintSec = 0;
 unsigned int nextTablePrintNano = 500000000;
 
+// Performance stats
 unsigned long long cpuBusyTime = 0;
 unsigned long long systemOverheadTime = 0;
+unsigned long long idleTime = 0;
 
+// Writes to log file (stops after limit)
 void writeLog(const string& text) {
     if (logLines < MAX_LOG_LINES) {
         logFile << text;
         logLines++;
+        if (logLines == MAX_LOG_LINES) {
+            logFile << "OSS: Log limit reached, suppressing further log output.\n";
+        }
     }
 }
 
+// Adds nanoseconds and handles rollover into seconds
 void addToTime(unsigned int& sec, unsigned int& nano, unsigned int addNano) {
     nano += addNano;
     while (nano >= BILLION) {
@@ -90,10 +108,12 @@ void addToTime(unsigned int& sec, unsigned int& nano, unsigned int addNano) {
     }
 }
 
+// Advances the simulated clock
 void advanceClock(unsigned int ns) {
     addToTime(simClock->seconds, simClock->nanoseconds, ns);
 }
 
+// Checks if current time reached a target time
 bool timeReached(unsigned int sec1, unsigned int nano1,
                  unsigned int sec2, unsigned int nano2) {
     if (sec1 > sec2) return true;
@@ -101,6 +121,7 @@ bool timeReached(unsigned int sec1, unsigned int nano1,
     return false;
 }
 
+// Clean up shared memory and message queue
 void cleanup() {
     if (simClock != nullptr) {
         shmdt(simClock);
@@ -118,6 +139,7 @@ void cleanup() {
     }
 }
 
+// Kill all running child processes
 void killChildren() {
     for (int i = 0; i < PCB_SIZE; i++) {
         if (processTable[i].occupied && processTable[i].pid > 0) {
@@ -125,10 +147,10 @@ void killChildren() {
         }
     }
 
-    while (waitpid(-1, nullptr, WNOHANG) > 0) {
-    }
+    while (waitpid(-1, nullptr, WNOHANG) > 0) {}
 }
 
+// Handles CTRL+C or timeout
 void signalHandler(int sig) {
     cerr << "\nOSS: caught signal " << sig << ", cleaning up.\n";
     killChildren();
@@ -136,194 +158,65 @@ void signalHandler(int sig) {
     exit(1);
 }
 
-void printUsage(const char* program) {
-    cout << "Usage: " << program
-         << " [-h] [-n proc] [-s simul] [-t timelimitForChildren] "
-         << "[-i fractionOfSecondToLaunchChildren] [-f logfile]\n";
-}
-
+// Parses command line arguments
 void parseArguments(int argc, char* argv[]) {
     int opt;
-
     while ((opt = getopt(argc, argv, "hn:s:t:i:f:")) != -1) {
         switch (opt) {
-            case 'h':
-                printUsage(argv[0]);
-                exit(0);
-            case 'n':
-                totalChildren = atoi(optarg);
-                break;
-            case 's':
-                maxSimultaneous = atoi(optarg);
-                break;
-            case 't':
-                timeLimitForChildren = atof(optarg);
-                break;
-            case 'i':
-                launchInterval = atof(optarg);
-                break;
-            case 'f':
-                logFileName = optarg;
-                break;
-            default:
-                printUsage(argv[0]);
-                exit(1);
+            case 'n': totalChildren = atoi(optarg); break;
+            case 's': maxSimultaneous = atoi(optarg); break;
+            case 't': timeLimitForChildren = atof(optarg); break;
+            case 'i': launchInterval = atof(optarg); break;
+            case 'f': logFileName = optarg; break;
         }
     }
-
-    if (totalChildren < 1) totalChildren = 1;
-    if (totalChildren > MAX_TOTAL_PROCESSES) totalChildren = MAX_TOTAL_PROCESSES;
-
-    if (maxSimultaneous < 1) maxSimultaneous = 1;
-    if (maxSimultaneous > PCB_SIZE) maxSimultaneous = PCB_SIZE;
-
-    if (timeLimitForChildren <= 0) timeLimitForChildren = 1.0;
-    if (launchInterval < 0) launchInterval = 0.0;
 }
 
+// Initializes process table (all empty)
 void initProcessTable() {
     for (int i = 0; i < PCB_SIZE; i++) {
         processTable[i].occupied = 0;
-        processTable[i].pid = 0;
-        processTable[i].localPid = i;
-        processTable[i].startSeconds = 0;
-        processTable[i].startNano = 0;
-        processTable[i].serviceTimeSeconds = 0;
-        processTable[i].serviceTimeNano = 0;
-        processTable[i].eventWaitSec = 0;
-        processTable[i].eventWaitNano = 0;
         processTable[i].blocked = 0;
     }
 }
 
+// Finds a free slot in PCB
 int getFreePCB() {
     for (int i = 0; i < PCB_SIZE; i++) {
-        if (!processTable[i].occupied) {
-            return i;
-        }
+        if (!processTable[i].occupied) return i;
     }
     return -1;
 }
 
-void addServiceTime(int index, unsigned int ns) {
-    addToTime(processTable[index].serviceTimeSeconds,
-              processTable[index].serviceTimeNano,
-              ns);
-}
-
-void removeFromPCB(int index) {
-    processTable[index].occupied = 0;
-    processTable[index].pid = 0;
-    processTable[index].localPid = index;
-    processTable[index].startSeconds = 0;
-    processTable[index].startNano = 0;
-    processTable[index].serviceTimeSeconds = 0;
-    processTable[index].serviceTimeNano = 0;
-    processTable[index].eventWaitSec = 0;
-    processTable[index].eventWaitNano = 0;
-    processTable[index].blocked = 0;
-}
-
-void setNextLaunchTime(double interval) {
-    unsigned int ns = static_cast<unsigned int>(interval * BILLION);
-    nextLaunchSec = simClock->seconds;
-    nextLaunchNano = simClock->nanoseconds;
-    addToTime(nextLaunchSec, nextLaunchNano, ns);
-}
-
-bool timeToLaunch() {
-    return timeReached(simClock->seconds, simClock->nanoseconds,
-                       nextLaunchSec, nextLaunchNano);
-}
-
-void printReadyQueue() {
-    queue<int> temp = readyQueue;
-    string line = "OSS: Ready queue [ ";
-
-    while (!temp.empty()) {
-        int index = temp.front();
-        temp.pop();
-        line += "P" + to_string(index) + " ";
-    }
-
-    line += "]\n";
-    writeLog(line);
-}
-
-void printProcessTable() {
-    ostringstream out;
-    out << "\nOSS: Process Table at time "
-        << simClock->seconds << ":" << simClock->nanoseconds << "\n";
-    out << left
-        << setw(6)  << "Entry"
-        << setw(10) << "Occupied"
-        << setw(10) << "PID"
-        << setw(10) << "Local"
-        << setw(12) << "StartSec"
-        << setw(12) << "StartNano"
-        << setw(12) << "ServSec"
-        << setw(12) << "ServNano"
-        << setw(10) << "Blocked"
-        << "\n";
-
-    writeLog(out.str());
-
-    for (int i = 0; i < PCB_SIZE; i++) {
-        ostringstream row;
-        row << left
-            << setw(6)  << i
-            << setw(10) << processTable[i].occupied
-            << setw(10) << processTable[i].pid
-            << setw(10) << processTable[i].localPid
-            << setw(12) << processTable[i].startSeconds
-            << setw(12) << processTable[i].startNano
-            << setw(12) << processTable[i].serviceTimeSeconds
-            << setw(12) << processTable[i].serviceTimeNano
-            << setw(10) << processTable[i].blocked
-            << "\n";
-        writeLog(row.str());
-    }
-
-    writeLog("\n");
-}
-
+// Launches a new worker process
 void launchWorker(int index) {
     pid_t pid = fork();
 
-    if (pid < 0) {
-        perror("fork");
-        return;
-    }
-
     if (pid == 0) {
-        string burstStr = to_string(timeLimitForChildren);
-        string indexStr = to_string(index);
-
-        execl("./worker", "worker", burstStr.c_str(), indexStr.c_str(), (char*)nullptr);
-        perror("execl");
+        // child runs worker program
+        execl("./worker", "worker",
+              to_string(timeLimitForChildren).c_str(),
+              to_string(index).c_str(),
+              (char*)nullptr);
         exit(1);
     }
 
+    // parent sets up PCB
     processTable[index].occupied = 1;
     processTable[index].pid = pid;
     processTable[index].localPid = index;
-    processTable[index].startSeconds = simClock->seconds;
-    processTable[index].startNano = simClock->nanoseconds;
-    processTable[index].serviceTimeSeconds = 0;
-    processTable[index].serviceTimeNano = 0;
-    processTable[index].blocked = 0;
 
-    readyQueue.push(index);
+    readyQueue.push(index); // add to ready queue
 
-    writeLog("OSS: Generating process with PID " + to_string(pid) +
-             " and putting it in ready queue at time " +
-             to_string(simClock->seconds) + ":" +
-             to_string(simClock->nanoseconds) + "\n");
+    writeLog("OSS: Generating process and putting in ready queue\n");
 }
 
+// Checks if blocked processes are ready again
 void checkBlockedProcesses() {
     for (int i = 0; i < PCB_SIZE; i++) {
         if (processTable[i].occupied && processTable[i].blocked) {
+
+            // if time passed  unblock it
             if (timeReached(simClock->seconds, simClock->nanoseconds,
                             processTable[i].eventWaitSec,
                             processTable[i].eventWaitNano)) {
@@ -331,235 +224,11 @@ void checkBlockedProcesses() {
                 processTable[i].blocked = 0;
                 readyQueue.push(i);
 
-                writeLog("OSS: Unblocking process with PID " +
-                         to_string(processTable[i].pid) +
-                         " and putting it in ready queue at time " +
-                         to_string(simClock->seconds) + ":" +
-                         to_string(simClock->nanoseconds) + "\n");
+                writeLog("OSS: Unblocking process and putting back in ready queue\n");
 
-                advanceClock(5000);
-                systemOverheadTime += 5000;
+                advanceClock(UNBLOCK_OVERHEAD);
+                systemOverheadTime += UNBLOCK_OVERHEAD;
             }
         }
     }
-}
-
-int main(int argc, char* argv[]) {
-    signal(SIGINT, signalHandler);
-    signal(SIGTERM, signalHandler);
-    signal(SIGALRM, signalHandler);
-    alarm(60);
-
-    parseArguments(argc, argv);
-
-    logFile.open(logFileName.c_str(), ios::out | ios::trunc);
-    if (!logFile) {
-        cerr << "Failed to open log file.\n";
-        return 1;
-    }
-
-    key_t shmKey = ftok(".", 65);
-    if (shmKey == -1) {
-        perror("ftok shm");
-        return 1;
-    }
-
-    shmId = shmget(shmKey, sizeof(SimClock), IPC_CREAT | 0666);
-    if (shmId == -1) {
-        perror("shmget");
-        return 1;
-    }
-
-    simClock = (SimClock*)shmat(shmId, nullptr, 0);
-    if (simClock == (void*)-1) {
-        perror("shmat");
-        simClock = nullptr;
-        cleanup();
-        return 1;
-    }
-
-    simClock->seconds = 0;
-    simClock->nanoseconds = 0;
-
-    key_t msgKey = ftok(".", 75);
-    if (msgKey == -1) {
-        perror("ftok msg");
-        cleanup();
-        return 1;
-    }
-
-    msgId = msgget(msgKey, IPC_CREAT | 0666);
-    if (msgId == -1) {
-        perror("msgget");
-        cleanup();
-        return 1;
-    }
-
-    initProcessTable();
-    setNextLaunchTime(0.0);
-
-    while (finishedTotal < totalChildren) {
-        checkBlockedProcesses();
-
-        while (runningNow < maxSimultaneous &&
-               launchedTotal < totalChildren &&
-               timeToLaunch()) {
-            int index = getFreePCB();
-            if (index == -1) {
-                break;
-            }
-
-            launchWorker(index);
-            launchedTotal++;
-            runningNow++;
-
-            setNextLaunchTime(launchInterval);
-            advanceClock(1000);
-            systemOverheadTime += 1000;
-        }
-
-        if (!readyQueue.empty()) {
-            printReadyQueue();
-
-            int index = readyQueue.front();
-            readyQueue.pop();
-            pid_t childPid = processTable[index].pid;
-
-            writeLog("OSS: Dispatching process with PID " +
-                     to_string(childPid) +
-                     " from ready queue at time " +
-                     to_string(simClock->seconds) + ":" +
-                     to_string(simClock->nanoseconds) + "\n");
-
-            advanceClock(1000);
-            systemOverheadTime += 1000;
-            writeLog("OSS: total time this dispatch was 1000 nanoseconds\n");
-
-            Message dispatchMsg;
-            dispatchMsg.mtype = childPid;
-            dispatchMsg.index = index;
-            dispatchMsg.quantum = BASE_QUANTUM;
-
-            if (msgsnd(msgId, &dispatchMsg, sizeof(Message) - sizeof(long), 0) == -1) {
-                perror("msgsnd");
-                killChildren();
-                cleanup();
-                return 1;
-            }
-
-            Message replyMsg;
-            if (msgrcv(msgId, &replyMsg, sizeof(Message) - sizeof(long), 1, 0) == -1) {
-                perror("msgrcv");
-                killChildren();
-                cleanup();
-                return 1;
-            }
-
-            int usedTime = replyMsg.quantum;
-
-            if (usedTime < 0) {
-                usedTime = -usedTime;
-
-                writeLog("OSS: Receiving that process with PID " +
-                         to_string(childPid) +
-                         " terminated after running for " +
-                         to_string(usedTime) + " nanoseconds\n");
-
-                advanceClock(static_cast<unsigned int>(usedTime));
-                cpuBusyTime += static_cast<unsigned int>(usedTime);
-                addServiceTime(index, static_cast<unsigned int>(usedTime));
-
-                waitpid(childPid, nullptr, 0);
-
-                removeFromPCB(index);
-                runningNow--;
-                finishedTotal++;
-
-                writeLog("OSS: Process with PID " +
-                         to_string(childPid) +
-                         " removed from system\n");
-            }
-            else if (usedTime < static_cast<int>(BASE_QUANTUM)) {
-                writeLog("OSS: Receiving that process with PID " +
-                         to_string(childPid) +
-                         " ran for " + to_string(usedTime) +
-                         " nanoseconds\n");
-                writeLog("OSS: not using its entire time quantum\n");
-                writeLog("OSS: Putting process with PID " +
-                         to_string(childPid) +
-                         " into blocked queue\n");
-
-                advanceClock(static_cast<unsigned int>(usedTime));
-                cpuBusyTime += static_cast<unsigned int>(usedTime);
-                addServiceTime(index, static_cast<unsigned int>(usedTime));
-
-                processTable[index].blocked = 1;
-                processTable[index].eventWaitSec = simClock->seconds;
-                processTable[index].eventWaitNano = simClock->nanoseconds;
-                addToTime(processTable[index].eventWaitSec,
-                          processTable[index].eventWaitNano,
-                          BLOCK_TIME);
-
-                writeLog("OSS: Process with PID " +
-                         to_string(childPid) +
-                         " will unblock at time " +
-                         to_string(processTable[index].eventWaitSec) + ":" +
-                         to_string(processTable[index].eventWaitNano) + "\n");
-            }
-            else {
-                writeLog("OSS: Receiving that process with PID " +
-                         to_string(childPid) +
-                         " ran for " + to_string(usedTime) +
-                         " nanoseconds\n");
-
-                advanceClock(static_cast<unsigned int>(usedTime));
-                cpuBusyTime += static_cast<unsigned int>(usedTime);
-                addServiceTime(index, static_cast<unsigned int>(usedTime));
-
-                readyQueue.push(index);
-
-                writeLog("OSS: Putting process with PID " +
-                         to_string(childPid) +
-                         " into ready queue\n");
-            }
-        } else {
-            advanceClock(100000);
-        }
-
-        if (timeReached(simClock->seconds, simClock->nanoseconds,
-                        nextTablePrintSec, nextTablePrintNano)) {
-            printProcessTable();
-            addToTime(nextTablePrintSec, nextTablePrintNano, 500000000);
-        }
-    }
-
-    while (waitpid(-1, nullptr, WNOHANG) > 0) {
-    }
-
-    unsigned long long totalSimulatedTime =
-        static_cast<unsigned long long>(simClock->seconds) * BILLION +
-        simClock->nanoseconds;
-
-    double cpuUtilization = 0.0;
-    if (totalSimulatedTime > 0) {
-        cpuUtilization =
-            (static_cast<double>(cpuBusyTime) / static_cast<double>(totalSimulatedTime)) * 100.0;
-    }
-
-    writeLog("\nOSS: Total processes launched: " + to_string(launchedTotal) + "\n");
-    writeLog("OSS: Total processes finished: " + to_string(finishedTotal) + "\n");
-    writeLog("OSS: Total CPU busy time: " + to_string(cpuBusyTime) + " ns\n");
-    writeLog("OSS: Total system overhead time: " + to_string(systemOverheadTime) + " ns\n");
-    writeLog("OSS: Simulation finished at time " +
-             to_string(simClock->seconds) + ":" +
-             to_string(simClock->nanoseconds) + "\n");
-
-    ostringstream finalReport;
-    finalReport << fixed << setprecision(2)
-                << "OSS: Average CPU utilization: " << cpuUtilization << "%\n";
-    writeLog(finalReport.str());
-
-    cleanup();
-    logFile.close();
-    return 0;
 }
