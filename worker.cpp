@@ -7,11 +7,29 @@
 
 using namespace std;
 
+const long long BILLION_LL = 1000000000LL;
+
 struct Message {
     long mtype;
     int index;
     int quantum;
 };
+
+long long randomLongLong(long long maxValue) {
+    if (maxValue <= 1) {
+        return 1;
+    }
+
+    long long high = static_cast<long long>(rand());
+    long long low = static_cast<long long>(rand());
+    long long combined = (high << 31) ^ low;
+
+    if (combined < 0) {
+        combined = -combined;
+    }
+
+    return (combined % maxValue) + 1;
+}
 
 int main(int argc, char* argv[]) {
     if (argc < 3) {
@@ -22,16 +40,17 @@ int main(int argc, char* argv[]) {
     double burstLimitSeconds = atof(argv[1]);
     int localIndex = atoi(argv[2]);
 
-    int totalBurstNano = static_cast<int>(burstLimitSeconds * 1000000000.0);
-    if (totalBurstNano <= 0) {
-        totalBurstNano = 1000000;
+    long long maxBurstNano = static_cast<long long>(burstLimitSeconds * BILLION_LL);
+    if (maxBurstNano <= 0) {
+        maxBurstNano = BILLION_LL;
     }
 
-    int usedSoFar = 0;
+    srand(static_cast<unsigned int>(getpid() ^ time(nullptr) ^ (localIndex * 7919)));
 
-    srand(static_cast<unsigned int>(getpid() ^ time(nullptr)));
-
-    usleep(100000);
+    // Each process gets a random total CPU burst from 1 ns up to the -t limit.
+    // This fixes the old integer overflow where 3 seconds became negative.
+    long long totalBurstNano = randomLongLong(maxBurstNano);
+    long long usedSoFar = 0;
 
     key_t msgKey = ftok(".", 75);
     if (msgKey == -1) {
@@ -54,15 +73,17 @@ int main(int argc, char* argv[]) {
         }
 
         int quantum = msg.quantum;
-        int remaining = totalBurstNano - usedSoFar;
+        long long remaining = totalBurstNano - usedSoFar;
 
         Message reply;
         reply.mtype = 1;
         reply.index = localIndex;
+        reply.quantum = 0;
 
         if (remaining <= quantum) {
+            // Negative means the process terminated after using this much time.
             usedSoFar += remaining;
-            reply.quantum = -remaining;
+            reply.quantum = -static_cast<int>(remaining);
 
             if (msgsnd(msgId, &reply, sizeof(Message) - sizeof(long), 0) == -1) {
                 perror("worker msgsnd terminate");
@@ -75,10 +96,11 @@ int main(int argc, char* argv[]) {
         int blockChance = rand() % 100;
 
         if (blockChance < 20) {
+            // Positive and less than the quantum means I/O interrupt / blocked.
             int used = (rand() % (quantum - 1)) + 1;
 
             if (used > remaining) {
-                used = remaining;
+                used = static_cast<int>(remaining);
             }
 
             usedSoFar += used;
@@ -89,6 +111,7 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
         } else {
+            // Equal to the quantum means it used the whole time slice.
             usedSoFar += quantum;
             reply.quantum = quantum;
 

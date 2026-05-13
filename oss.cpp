@@ -5,9 +5,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cstdlib>
-#include <cstdio>
-#include <cstring>
-#include <cerrno>
+#include <ctime>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/ipc.h>
@@ -20,11 +18,10 @@ using namespace std;
 const int MAX_TOTAL_PROCESSES = 20;
 const int PCB_SIZE = 18;
 const unsigned int BILLION = 1000000000;
-const unsigned int BASE_QUANTUM = 25000000;   // 25ms
-const unsigned int BLOCK_TIME = 100000000;    // 100ms
-const unsigned int IDLE_INCREMENT = 100000;   // 100 microseconds
-const unsigned int DISPATCH_OVERHEAD = 1000;  // 1000 ns
-const unsigned int UNBLOCK_OVERHEAD = 5000;   // 5000 ns
+const unsigned int BASE_QUANTUM = 25000000;     // 25 ms
+const unsigned int BLOCK_TIME = 100000000;      // 100 ms
+const unsigned int IDLE_INCREMENT = 100000;     // used when nothing is ready
+const unsigned int UNBLOCK_OVERHEAD = 5000;     // moving blocked process takes time
 const int MAX_LOG_LINES = 10000;
 
 struct SimClock {
@@ -83,7 +80,9 @@ unsigned long long idleTime = 0;
 void writeLog(const string& text) {
     if (logLines < MAX_LOG_LINES) {
         logFile << text;
+        logFile.flush();
         logLines++;
+
         if (logLines == MAX_LOG_LINES) {
             logFile << "OSS: Log limit reached, suppressing further log output.\n";
         }
@@ -107,6 +106,11 @@ bool timeReached(unsigned int sec1, unsigned int nano1,
     if (sec1 > sec2) return true;
     if (sec1 == sec2 && nano1 >= nano2) return true;
     return false;
+}
+
+unsigned int getDispatchTime() {
+    // Keep this variable so the log does not always show exactly 1000 ns.
+    return static_cast<unsigned int>((rand() % 10000) + 1);
 }
 
 void cleanup() {
@@ -285,15 +289,19 @@ void printProcessTable() {
         << setw(12) << "StartNano"
         << setw(12) << "ServSec"
         << setw(12) << "ServNano"
-        << setw(10) << "Blocked"
+        << setw(12) << "Blocked"
+        << setw(12) << "EventSec"
+        << setw(12) << "EventNano"
         << "\n";
     writeLog(out.str());
 
+    bool any = false;
     for (int i = 0; i < PCB_SIZE; i++) {
         if (!processTable[i].occupied) {
             continue;
         }
 
+        any = true;
         ostringstream row;
         row << left
             << setw(6)  << i
@@ -304,11 +312,18 @@ void printProcessTable() {
             << setw(12) << processTable[i].startNano
             << setw(12) << processTable[i].serviceTimeSeconds
             << setw(12) << processTable[i].serviceTimeNano
-            << setw(10) << processTable[i].blocked
+            << setw(12) << processTable[i].blocked
+            << setw(12) << processTable[i].eventWaitSec
+            << setw(12) << processTable[i].eventWaitNano
             << "\n";
         writeLog(row.str());
     }
 
+    if (!any) {
+        writeLog("OSS: Process table has no active processes at this moment.\n");
+    }
+
+    printBlockedList();
     writeLog("\n");
 }
 
@@ -321,10 +336,10 @@ void launchWorker(int index) {
     }
 
     if (pid == 0) {
-        string burstStr = to_string(timeLimitForChildren);
+        string burstLimitStr = to_string(timeLimitForChildren);
         string indexStr = to_string(index);
 
-        execl("./worker", "worker", burstStr.c_str(), indexStr.c_str(), (char*)nullptr);
+        execl("./worker", "worker", burstLimitStr.c_str(), indexStr.c_str(), (char*)nullptr);
         perror("execl");
         exit(1);
     }
@@ -336,6 +351,8 @@ void launchWorker(int index) {
     processTable[index].startNano = simClock->nanoseconds;
     processTable[index].serviceTimeSeconds = 0;
     processTable[index].serviceTimeNano = 0;
+    processTable[index].eventWaitSec = 0;
+    processTable[index].eventWaitNano = 0;
     processTable[index].blocked = 0;
 
     readyQueue.push(index);
@@ -369,7 +386,17 @@ void checkBlockedProcesses() {
     }
 }
 
+void handleTablePrinting() {
+    while (timeReached(simClock->seconds, simClock->nanoseconds,
+                       nextTablePrintSec, nextTablePrintNano)) {
+        printProcessTable();
+        addToTime(nextTablePrintSec, nextTablePrintNano, 500000000);
+    }
+}
+
 int main(int argc, char* argv[]) {
+    srand(static_cast<unsigned int>(time(nullptr) ^ getpid()));
+
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
     signal(SIGALRM, signalHandler);
@@ -438,11 +465,14 @@ int main(int argc, char* argv[]) {
             runningNow++;
 
             setNextLaunchTime(launchInterval);
-            advanceClock(DISPATCH_OVERHEAD);
-            systemOverheadTime += DISPATCH_OVERHEAD;
+
+            unsigned int createOverhead = getDispatchTime();
+            advanceClock(createOverhead);
+            systemOverheadTime += createOverhead;
         }
 
         checkBlockedProcesses();
+        handleTablePrinting();
 
         if (!readyQueue.empty()) {
             printReadyQueue();
@@ -457,9 +487,11 @@ int main(int argc, char* argv[]) {
                      to_string(simClock->seconds) + ":" +
                      to_string(simClock->nanoseconds) + "\n");
 
-            advanceClock(DISPATCH_OVERHEAD);
-            systemOverheadTime += DISPATCH_OVERHEAD;
-            writeLog("OSS: total time this dispatch was 1000 nanoseconds\n");
+            unsigned int dispatchTime = getDispatchTime();
+            advanceClock(dispatchTime);
+            systemOverheadTime += dispatchTime;
+            writeLog("OSS: total time this dispatch was " +
+                     to_string(dispatchTime) + " nanoseconds\n");
 
             Message dispatchMsg;
             dispatchMsg.mtype = childPid;
@@ -496,7 +528,6 @@ int main(int argc, char* argv[]) {
                 addServiceTime(index, static_cast<unsigned int>(usedTime));
 
                 waitpid(childPid, nullptr, 0);
-
                 removeFromPCB(index);
                 runningNow--;
                 finishedTotal++;
@@ -531,6 +562,7 @@ int main(int argc, char* argv[]) {
                          " will unblock at time " +
                          to_string(processTable[index].eventWaitSec) + ":" +
                          to_string(processTable[index].eventWaitNano) + "\n");
+                printBlockedList();
             }
             else {
                 writeLog("OSS: Receiving that process with PID " +
@@ -549,21 +581,12 @@ int main(int argc, char* argv[]) {
                          " into ready queue\n");
             }
         } else {
-            if (launchedTotal < totalChildren && !timeToLaunch()) {
-                advanceClock(IDLE_INCREMENT);
-                idleTime += IDLE_INCREMENT;
-            } else if (runningNow > 0) {
-                advanceClock(IDLE_INCREMENT);
-                idleTime += IDLE_INCREMENT;
-            }
+            // No process is ready. Time still moves forward until a launch or unblock can happen.
+            advanceClock(IDLE_INCREMENT);
+            idleTime += IDLE_INCREMENT;
         }
 
-        if (timeReached(simClock->seconds, simClock->nanoseconds,
-                        nextTablePrintSec, nextTablePrintNano)) {
-            printProcessTable();
-            printBlockedList();
-            addToTime(nextTablePrintSec, nextTablePrintNano, 500000000);
-        }
+        handleTablePrinting();
     }
 
     while (waitpid(-1, nullptr, WNOHANG) > 0) {
@@ -576,7 +599,8 @@ int main(int argc, char* argv[]) {
     double cpuUtilization = 0.0;
     if (totalSimulatedTime > 0) {
         cpuUtilization =
-            (static_cast<double>(cpuBusyTime) / static_cast<double>(totalSimulatedTime)) * 100.0;
+            (static_cast<double>(cpuBusyTime) /
+             static_cast<double>(totalSimulatedTime)) * 100.0;
     }
 
     writeLog("\nOSS: Total processes launched: " + to_string(launchedTotal) + "\n");
