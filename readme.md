@@ -40,7 +40,7 @@ make
 
 13. Tested that oss runs correctly, initializes all structures, writes to the log file, and exits cleanly without memory or IPC leaks.
 
-14. Worker process currently acts as a placeholder to ensure compilation and message queue setup works before adding scheduling logic.
+14. Worker process was first used as a placeholder, then later updated to receive scheduling messages, simulate CPU usage, block, and terminate.
 
 15. Added the Round Robin Scheduling using the ready queue.
 
@@ -106,6 +106,24 @@ average CPU utilization
 
 38. Final day was mainly used for polishing the project, improving logging, and making sure the scheduler behavior matched the assignment requirements.
 
+----- Things that I have fixed from original: -----
+
+1. Fixed the worker CPU burst time issue. The original version could make workers terminate too quickly because the burst time in nanoseconds was too large for a regular int. I changed the time tracking to use a larger type so processes can run longer and actually go through the scheduler.
+
+2. Removed the use of usleep() from the worker.  the worker now only simulates CPU usage by calculating how much time it used and sending that value back to oss.
+
+3. Fixed the blocked queue behavior. Workers now return partial quantum values when they block, and oss correctly places those processes into the blocked queue.
+
+4. Added proper unblocking behavior. When a process blocks, oss stores the event wait time in the PCB and later moves the process back into the ready queue after 100ms of simulated time.
+
+5. Fixed the process table output so it shows active processes while the simulation is running. The process table now displays occupied entries, PID, local PID, start time, service time, blocked status, and event wait time.
+
+6. Changed dispatch time so it is not always exactly 1000 nanoseconds. The dispatch time is now randomized.
+
+7. Improved the ready queue and blocked queue logging so it is easier to see what the scheduler is doing. The log now shows when processes are generated, dispatched, blocked, unblocked, terminated, and placed back into the ready queue.
+
+8. Tested the fixed version with multiple command line options, The output now shows blocking, unblocking, process table entries, variable dispatch times, and final CPU utilization.
+
 
 
 
@@ -127,3 +145,7 @@ This helped show how to properly remove shared memory, delete message queues, an
 -Asked ChatGPT how to calculate CPU utilization and improve final statistics.
 
 This helped with adding the final report at the end of the simulation and understanding how to track busy time, idle time, and overhead time.
+
+-Asked ChatGPT to help find why my output did not show blocking/unblocking behavior correctly.
+
+TThis helped show what theissue was with worker CPU burst time being stored in a regular int. Since values like 3 seconds become 3,000,000,000 nanoseconds, that could overflow and cause processes to terminate too quickly.
